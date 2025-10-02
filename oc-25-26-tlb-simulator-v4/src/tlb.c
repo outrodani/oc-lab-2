@@ -52,6 +52,22 @@ void tlb_invalidate(va_t virtual_page_number) {
   (void)(virtual_page_number);  // Suppress unused variable warning. You can
                                 // delete this when implementing the actual
                                 // function.
+  //L1
+  for (int i = 0; i < (int)TLB_L1_SIZE; i++) {
+    if (tlb_l1[i].valid && tlb_l1[i].virtual_page_number == virtual_page_number) {
+      // Se a linha tem alterações ainda não guardadas, faz write-back
+      if (tlb_l1[i].dirty) {
+        pa_dram_t base_pa = (tlb_l1[i].physical_page_number << PAGE_SIZE_BITS);
+        write_back_tlb_entry(base_pa);  //write-back
+      }
+
+      tlb_l1[i].valid = false;
+      tlb_l1[i].dirty = false;     
+      tlb_l1[i].last_access = 0;   
+
+      tlb_l1_invalidations++;      
+    }
+  }
   // TODO: implement TLB entry invalidation.
 }
 
