@@ -50,6 +50,38 @@ void tlb_init() {
   tlb_l2_invalidations = 0;
 }
 
+void writeback_l1_to_l2(va_t vpn, pa_dram_t ppn);
+
+void tlb_fill_entry(tlb_entry_t *entry, bool dirty, va_t vpn, pa_dram_t ppn) {
+    entry->valid = true;
+    entry->dirty = dirty;
+    entry->last_access = get_time();
+    entry->virtual_page_number = vpn;
+    entry->physical_page_number = ppn;
+}
+
+int tlb_select_entry(tlb_entry_t *tlb, int size, bool is_l1) {
+    int idx = -1;
+    for (int i = 0; i < size; i++)
+        if (!tlb[i].valid) return i;  // posição livre
+    
+    // Escolher vítima na LRU
+    time_ns_t oldest = (time_ns_t)(~(time_ns_t)0);
+    for (int i = 0; i < size; i++)
+        if (tlb[i].last_access < oldest) { oldest = tlb[i].last_access; idx = i; }
+
+    // Se a vítima estiver dirty, write-back para DRAM
+    if (tlb[idx].valid && tlb[idx].dirty) {
+        if (is_l1) 
+            writeback_l1_to_l2(tlb[idx].virtual_page_number, tlb[idx].physical_page_number);
+        else {
+            pa_dram_t base = tlb[idx].physical_page_number << PAGE_SIZE_BITS;
+            write_back_tlb_entry(base);
+        }
+    }
+    return idx;
+}
+
 void writeback_l1_to_l2(va_t vpn, pa_dram_t ppn)
 {
     // 1) Procura a VPN já na L2
@@ -69,32 +101,10 @@ void writeback_l1_to_l2(va_t vpn, pa_dram_t ppn)
     }
 
     // 2) Não existe: escolher índice na L2 (inválido -> LRU)
-    int idx = -1;
-    for (int i = 0; i < (int)TLB_L2_SIZE; i++) {
-        if (!tlb_l2[i].valid) { idx = i; break; }
-    }
-    if (idx < 0) {
-        // LRU na L2
-        time_ns_t oldest = (time_ns_t)(~(time_ns_t)0);
-        for (int i = 0; i < (int)TLB_L2_SIZE; i++) {
-            if (tlb_l2[i].last_access < oldest) {
-                oldest = tlb_l2[i].last_access;
-                idx = i;
-            }
-        }
-        // Se a vítima estiver dirty, write-back para DRAM
-        if (tlb_l2[idx].valid && tlb_l2[idx].dirty) {
-            pa_dram_t base = (tlb_l2[idx].physical_page_number << PAGE_SIZE_BITS);
-            write_back_tlb_entry(base);
-        }
-    }
+    int idx = tlb_select_entry(tlb_l2, TLB_L2_SIZE, false);
 
     // 3) Escrever/atualizar a linha na L2 (fica dirty porque vem de write-back)
-    tlb_l2[idx].valid = true;
-    tlb_l2[idx].dirty = true;                    
-    tlb_l2[idx].last_access = get_time();
-    tlb_l2[idx].virtual_page_number = vpn;
-    tlb_l2[idx].physical_page_number = ppn;
+    tlb_fill_entry(&tlb_l2[idx], true, vpn, ppn);
 }
 
 void tlb_invalidate(va_t virtual_page_number) {
@@ -180,27 +190,10 @@ pa_dram_t tlb_translate(va_t virtual_address, op_t op) {
     pa_dram_t pa  = (ppn << PAGE_SIZE_BITS) | off;
 
     // --- escolher um slot na L1 (inválido ou LRU) ---
-    int idx = -1;
-    for (int i = 0; i < (int)TLB_L1_SIZE; i++)
-      if (!tlb_l1[i].valid) { idx = i; break; }
-    if (idx < 0) {
-      // não há vaga: escolhe vítima LRU
-      time_ns_t oldest = (time_ns_t)(~(time_ns_t)0);
-      for (int i = 0; i < (int)TLB_L1_SIZE; i++) {
-        if (tlb_l1[i].last_access < oldest) { oldest = tlb_l1[i].last_access; idx = i; }
-      }
-      // write-back só se a vítima estiver suja
-      if (tlb_l1[idx].valid && tlb_l1[idx].dirty) {
-        writeback_l1_to_l2(tlb_l1[idx].virtual_page_number , tlb_l1[idx].physical_page_number);
-      }
-    }
+    int idx = tlb_select_entry(tlb_l1, TLB_L1_SIZE, true);
 
     // --- preencher a linha na L1 com a tradução vinda da L2 ---
-    tlb_l1[idx].valid = true;
-    tlb_l1[idx].dirty = (op == OP_WRITE);   // só fica dirty se esta operação for WRITE
-    tlb_l1[idx].last_access = get_time();
-    tlb_l1[idx].virtual_page_number = vpn;
-    tlb_l1[idx].physical_page_number = ppn;
+    tlb_fill_entry(&tlb_l1[idx], (op == OP_WRITE), vpn, ppn);
 
     return pa;                               // não há page table aqui
   }
@@ -217,49 +210,16 @@ pa_dram_t tlb_translate(va_t virtual_address, op_t op) {
   // =========================
   // 6) INSERIR NA L2 (para reuso futuro) — manter L2 limpa
   // =========================
-  int l2_idx = -1;
-  for (int i = 0; i < (int)TLB_L2_SIZE; i++)
-    if (!tlb_l2[i].valid) { l2_idx = i; break; }
-  if (l2_idx < 0) {
-    // escolher vítima LRU na L2
-    time_ns_t oldest2 = (time_ns_t)(~(time_ns_t)0);
-    for (int i = 0; i < (int)TLB_L2_SIZE; i++) {
-      if (tlb_l2[i].last_access < oldest2) { oldest2 = tlb_l2[i].last_access; l2_idx = i; }
-    }
-    // write-back na L2 só se, por algum motivo, a vítima estiver suja
-    if (tlb_l2[l2_idx].valid && tlb_l2[l2_idx].dirty) {
-      pa_dram_t base2 = tlb_l2[l2_idx].physical_page_number << PAGE_SIZE_BITS;
-      write_back_tlb_entry(base2);
-    }
-  }
-  tlb_l2[l2_idx].valid = true;
-  tlb_l2[l2_idx].dirty = false;             // regra de ouro: L2 fica sempre limpa
-  tlb_l2[l2_idx].last_access = get_time();
-  tlb_l2[l2_idx].virtual_page_number = vpn;
-  tlb_l2[l2_idx].physical_page_number = ppn_res;
+  int l2_idx = tlb_select_entry(tlb_l2, TLB_L2_SIZE, false);
+
+  tlb_fill_entry(&tlb_l2[l2_idx], false, vpn, ppn_res);   // L2 mantém-se limpa
 
   // =========================
   // 7) INSERIR/PROMOVER TAMBÉM NA L1 (é o nível “quente”)
   // =========================
-  int l1_idx = -1;
-  for (int i = 0; i < (int)TLB_L1_SIZE; i++)
-    if (!tlb_l1[i].valid) { l1_idx = i; break; }
-  if (l1_idx < 0) {
-    // vítima LRU na L1
-    time_ns_t oldest = (time_ns_t)(~(time_ns_t)0);
-    for (int i = 0; i < (int)TLB_L1_SIZE; i++) {
-      if (tlb_l1[i].last_access < oldest) { oldest = tlb_l1[i].last_access; l1_idx = i; }
-    }
-    // write-back se a vítima da L1 estiver suja
-    if (tlb_l1[l1_idx].valid && tlb_l1[l1_idx].dirty) {
-      writeback_l1_to_l2(tlb_l1[l1_idx].virtual_page_number , tlb_l1[l1_idx].physical_page_number);
-    }
-  }
-  tlb_l1[l1_idx].valid = true;
-  tlb_l1[l1_idx].dirty = (op == OP_WRITE);  // READ → false; WRITE → true
-  tlb_l1[l1_idx].last_access = get_time();
-  tlb_l1[l1_idx].virtual_page_number = vpn;
-  tlb_l1[l1_idx].physical_page_number = ppn_res;
+  int l1_idx = tlb_select_entry(tlb_l1, TLB_L1_SIZE, true);
+
+  tlb_fill_entry(&tlb_l1[l1_idx], (op == OP_WRITE), vpn, ppn_res);
 
   // =========================
   // 8) Devolver o PA calculado pela page table
