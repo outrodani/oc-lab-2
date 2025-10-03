@@ -69,7 +69,22 @@ void tlb_invalidate(va_t virtual_page_number) {
       tlb_l1_invalidations++;      
     }
   }
-  // TODO: implement TLB entry invalidation.
+
+  for (int i = 0; i < (int)TLB_L2_SIZE; i++) {
+      if (tlb_l2[i].valid && tlb_l2[i].virtual_page_number == virtual_page_number) {
+        increment_time(TLB_L2_LATENCY_NS);
+        if (tlb_l2[i].dirty) {
+            pa_dram_t base_pa = (tlb_l2[i].physical_page_number << PAGE_SIZE_BITS);
+            write_back_tlb_entry(base_pa);
+        }
+
+        tlb_l2[i].valid = false;
+        tlb_l2[i].dirty = false;
+        tlb_l2[i].last_access = 0;
+
+        tlb_l2_invalidations++;
+      }
+  }
 }
 
 pa_dram_t tlb_translate(va_t virtual_address, op_t op) {
