@@ -264,5 +264,6 @@ pa_dram_t tlb_translate(va_t virtual_address, op_t op) {
   // =========================
   // 8) Devolver o PA calculado pela page table
   // =========================
+  
   return pa_res;
 }
