@@ -172,9 +172,9 @@ pa_dram_t tlb_translate(va_t virtual_address, op_t op) {
 
   // HIT L2: promover para L1 e devolver
   if (l2_hit >= 0) {
-    tlb_l2_hits++;                           // estatística
+    tlb_l2_hits++; // estatística
     tlb_l2[l2_hit].last_access = get_time(); // LRU na L2
-    tlb_l2[l2_hit].dirty = false;            // mantemos a L2 SEMPRE limpa (evita WBs a mais)
+    tlb_l2[l2_hit].dirty = false;// mantemos a L2 SEMPRE limpa (evita WBs a mais)
 
     // Dados que vamos promover
     pa_dram_t ppn = tlb_l2[l2_hit].physical_page_number;
@@ -206,6 +206,6 @@ pa_dram_t tlb_translate(va_t virtual_address, op_t op) {
 
   tlb_fill_entry(&tlb_l1[l1_idx], (op == OP_WRITE), vpn, ppn_res);
 
-  // 8) Devolver o PA calculado pela page table  
+  // Devolver o PA calculado pela page table  
   return pa_res;
 }
